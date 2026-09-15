@@ -34,12 +34,8 @@ client = OpenAI(
     api_key=api_key,
     base_url=base_url
 )
-
-# Reusable tokenizer
 tokenizer = Tokenizer()
-
-
-system_prompt = (
+SYSTEM_PROMPT = (
     "You are an IT support assistant for an internal client "
     "documentation system. "
     "Your job is to help support teams find and understand "
@@ -52,112 +48,172 @@ system_prompt = (
     "'I don't know based on the provided information.'"
 )
 
+CONTEXT_BUDGET = 6000
 
-prompts = [
+history = [
     {
-        "name": "Vague Prompt",
-        "content": (
-            "Tell me about the incident procedure."
-        )
-    },
-    {
-        "name": "Clear Prompt",
-        "content": (
-            "For the ACME client, identify the incident "
-            "response procedure and summarize it in "
-            "exactly three bullet points. "
-            "If the ACME client procedure is not provided, "
-            "say 'I don't know based on the provided information.'"
-        )
+        "role": "system",
+        "content": SYSTEM_PROMPT
     }
 ]
 
+def total_tokens(messages):
+    """
+    Count the total text tokens currently present
+    in the conversation history.
+    """
 
-for prompt in prompts:
+    return sum(
+        tokenizer.count(message["content"])
+        for message in messages
+    )
 
-    print("\n" + "=" * 70)
-    print(prompt["name"])
-    print("=" * 70)
+def trim_history(messages, budget=CONTEXT_BUDGET):
+    """
+    Remove the oldest conversation turns until the
+    history fits inside the configured token budget.
 
-    messages = [
-        {
-            "role": "system",
-            "content": system_prompt
-        },
+    The system message is always preserved.
+    """
+
+    removed_messages = 0
+
+    while total_tokens(messages) > budget and len(messages) > 2:
+
+        messages.pop(1)
+
+        removed_messages += 1
+
+    return removed_messages
+
+def ask(user_message):
+    """
+    Add a user message, measure the history, trim if
+    necessary, send it to Gemini, and store the response.
+    """
+
+    history.append(
         {
             "role": "user",
-            "content": prompt["content"]
+            "content": user_message
         }
-    ]
+    )
 
-    # -----------------------------------------
-    # TOKEN COUNTING
-    # -----------------------------------------
+    before_trim = total_tokens(history)
 
-    system_tokens = tokenizer.count(system_prompt)
-    user_tokens = tokenizer.count(prompt["content"])
+    logging.info(
+        "History tokens before trimming: %s",
+        before_trim
+    )
 
-    input_tokens = system_tokens + user_tokens
+    removed_messages = trim_history(history)
 
-    print("\nToken Analysis:")
-    print(f"System prompt tokens : {system_tokens}")
-    print(f"User prompt tokens   : {user_tokens}")
-    print(f"Input tokens         : {input_tokens}")
+    after_trim = total_tokens(history)
+
+    logging.info(
+        "History tokens after trimming: %s",
+        after_trim
+    )
+
+    logging.info(
+        "Messages removed: %s",
+        removed_messages
+    )
 
     try:
 
-        logging.info("REQUEST: %s", messages)
         logging.info("MODEL: %s", model)
-        logging.info("INPUT TOKENS: %s", input_tokens)
+        logging.info("REQUEST TOKENS: %s", after_trim)
 
         response = client.chat.completions.create(
             model=model,
-            messages=messages
+            messages=history
         )
 
         answer = response.choices[0].message.content
 
-        # Count generated output tokens
+        history.append(
+            {
+                "role": "assistant",
+                "content": answer
+            }
+        )
+
         output_tokens = tokenizer.count(answer)
+        final_history_tokens = total_tokens(history)
 
-        total_tokens = input_tokens + output_tokens
+        logging.info(
+            "OUTPUT TOKENS: %s",
+            output_tokens
+        )
 
-        logging.info("RESPONSE: %s", answer)
-        logging.info("TOKENIZER INPUT TOKENS: %s", input_tokens)
-        logging.info("TOKENIZER OUTPUT TOKENS: %s", output_tokens)
-        logging.info("TOKENIZER TOTAL TOKENS: %s", total_tokens)
+        logging.info(
+            "HISTORY TOKENS AFTER RESPONSE: %s",
+            final_history_tokens
+        )
 
-        # -----------------------------------------
-        # OUTPUT
-        # -----------------------------------------
-
-        print("\nPrompt:")
-        print(prompt["content"])
-
-        print("\nAssistant:")
-        print(answer)
-
-        print("\nToken Analysis:")
-        print(f"Input tokens  : {input_tokens}")
-        print(f"Output tokens : {output_tokens}")
-        print(f"Total tokens  : {total_tokens}")
-
-        # Gemini/API usage if available
-        print("\nAPI Usage:")
-        print(response.usage)
+        return answer
 
     except AuthenticationError:
-        print(
-            "\nAuthentication failed (401). "
+        history.pop()
+
+        return (
+            "Authentication failed (401). "
             "Check GEMINI_API_KEY in your .env file."
         )
 
     except RateLimitError:
-        print(
-            "\nRate limited (429). "
+        history.pop()
+
+        return (
+            "Rate limited (429). "
             "Check your Gemini API quota/rate limit "
             "and retry later."
         )
 
     except Exception as error:
-        print(f"\nAPI request failed: {error}")
+        history.pop()
+
+        return f"API request failed: {error}"
+
+questions = [
+    "What documents are maintained for each client account?",
+
+    "For the ACME client, what information should I check "
+    "before starting an incident investigation?",
+
+    "What is the SLA for a P1 incident for ACME?",
+
+    "Who should be notified when the ACME production service "
+    "has a critical outage?",
+
+    "Which runbook should the support engineer follow for "
+    "an ACME production database outage?",
+
+    "What should be recorded during troubleshooting?",
+
+    "When should the incident be escalated to the database "
+    "engineering team?",
+
+    "What happens if the normal recovery procedure fails?"
+]
+
+
+for turn_number, question in enumerate(questions, start=1):
+
+    print("\n" + "=" * 70)
+    print(f"TURN {turn_number}")
+    print("=" * 70)
+
+    print("\nUser:")
+    print(question)
+
+    answer = ask(question)
+
+    print("\nAssistant:")
+    print(answer)
+
+    print("\nCurrent History Tokens:")
+    print(total_tokens(history))
+
+    print(f"Context Budget: {CONTEXT_BUDGET}")
